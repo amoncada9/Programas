@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Player, Enemy, Bullet, Particle, GameState } from '../types';
-import { Trophy, Heart, Zap, RotateCcw } from 'lucide-react';
+import { Trophy, Heart, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { soundManager } from '../lib/soundManager';
 
 const CANVAS_WIDTH = 400;
 const CANVAS_HEIGHT = 600;
@@ -20,11 +21,14 @@ const GameCanvas: React.FC = () => {
   const [lives, setLives] = useState(3);
   const [loops, setLoops] = useState(3);
   const [dimensions, setDimensions] = useState({ width: 400, height: 600 });
+  const [isMuted, setIsMuted] = useState(false);
 
-  const stateRef = useRef<GameState & { width: number; height: number }>({
+  const stateRef = useRef<GameState & { width: number; height: number; touchX: number | null; touchY: number | null }>({
     status: 'start',
     width: 400,
     height: 600,
+    touchX: null,
+    touchY: null,
     player: {
       id: 'player',
       x: 200 - PLAYER_WIDTH / 2,
@@ -89,11 +93,21 @@ const GameCanvas: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    
+    // Prevent default touch actions to avoid scrolling on mobile
+    const preventDefault = (e: TouchEvent) => {
+      if (gameState === 'playing') e.preventDefault();
+    };
+    window.addEventListener('touchstart', preventDefault, { passive: false });
+    window.addEventListener('touchmove', preventDefault, { passive: false });
+
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('touchstart', preventDefault);
+      window.removeEventListener('touchmove', preventDefault);
     };
-  }, []);
+  }, [gameState]);
 
   const triggerLoop = () => {
     const s = stateRef.current;
@@ -101,6 +115,7 @@ const GameCanvas: React.FC = () => {
       s.player.isLooping = true;
       s.player.loopTimer = 60; // 1 second at 60fps
       setLoops(prev => prev - 1);
+      soundManager.playLoop();
     }
   };
 
@@ -128,6 +143,7 @@ const GameCanvas: React.FC = () => {
   };
 
   const createExplosion = (x: number, y: number, color: string, count = 10) => {
+    soundManager.playExplosion();
     for (let i = 0; i < count; i++) {
       stateRef.current.particles.push({
         id: Math.random().toString(36).substr(2, 9),
@@ -148,17 +164,27 @@ const GameCanvas: React.FC = () => {
 
     // Player movement
     if (!s.player.isLooping) {
+      // Keyboard
       if (keysRef.current['ArrowLeft'] || keysRef.current['KeyA']) s.player.x -= s.player.speed;
       if (keysRef.current['ArrowRight'] || keysRef.current['KeyD']) s.player.x += s.player.speed;
       if (keysRef.current['ArrowUp'] || keysRef.current['KeyW']) s.player.y -= s.player.speed;
       if (keysRef.current['ArrowDown'] || keysRef.current['KeyS']) s.player.y += s.player.speed;
+
+      // Touch (Smooth follow)
+      if (s.touchX !== null && s.touchY !== null) {
+        const dx = s.touchX - (s.player.x + s.player.width / 2);
+        const dy = s.touchY - (s.player.y + s.player.height / 2);
+        s.player.x += dx * 0.2;
+        s.player.y += dy * 0.2;
+      }
 
       // Boundaries
       s.player.x = Math.max(0, Math.min(s.width - s.player.width, s.player.x));
       s.player.y = Math.max(0, Math.min(s.height - s.player.height, s.player.y));
 
       // Shooting
-      if (keysRef.current['Space'] && Date.now() - s.player.lastShot > 150) {
+      const isShooting = keysRef.current['Space'] || s.touchX !== null;
+      if (isShooting && Date.now() - s.player.lastShot > 150) {
         s.bullets.push({
           id: Math.random().toString(36).substr(2, 9),
           x: s.player.x + s.player.width / 2 - BULLET_WIDTH / 2,
@@ -172,6 +198,7 @@ const GameCanvas: React.FC = () => {
           damage: 1,
         });
         s.player.lastShot = Date.now();
+        soundManager.playShoot();
       }
     } else {
       s.player.loopTimer--;
@@ -223,6 +250,7 @@ const GameCanvas: React.FC = () => {
           s.player.y + s.player.height > enemy.y) {
         
         createExplosion(s.player.x + s.player.width / 2, s.player.y + s.player.height / 2, '#ff4444', 20);
+        soundManager.playHit();
         s.player.lives--;
         setLives(s.player.lives);
         s.enemies.splice(index, 1);
@@ -276,6 +304,7 @@ const GameCanvas: React.FC = () => {
           s.player.lives--;
           setLives(s.player.lives);
           createExplosion(s.player.x + s.player.width / 2, s.player.y + s.player.height / 2, '#ff4444', 20);
+          soundManager.playHit();
           
           if (s.player.lives <= 0) {
             s.status = 'gameover';
@@ -393,6 +422,7 @@ const GameCanvas: React.FC = () => {
   }, []);
 
   const startGame = () => {
+    soundManager.init();
     const s = stateRef.current;
     stateRef.current = {
       ...s,
@@ -425,12 +455,34 @@ const GameCanvas: React.FC = () => {
     setLoops(3);
   };
 
+  const handleTouch = (e: React.TouchEvent) => {
+    if (gameState !== 'playing') return;
+    const touch = e.touches[0];
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (rect) {
+      stateRef.current.touchX = touch.clientX - rect.left;
+      stateRef.current.touchY = touch.clientY - rect.top;
+    }
+  };
+
+  const toggleMute = () => {
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    soundManager.setEnabled(!newMuted);
+  };
+
   return (
-    <div ref={containerRef} className="relative flex flex-col items-center justify-center w-full h-screen bg-slate-950 font-mono text-white overflow-hidden">
+    <div ref={containerRef} className="relative flex flex-col items-center justify-center w-full h-screen bg-slate-950 font-mono text-white overflow-hidden touch-none">
       {/* Game Container */}
       <div 
         className="relative border-x-4 border-slate-800 shadow-2xl bg-slate-900" 
         style={{ width: dimensions.width, height: dimensions.height }}
+        onTouchStart={handleTouch}
+        onTouchMove={handleTouch}
+        onTouchEnd={() => {
+          stateRef.current.touchX = null;
+          stateRef.current.touchY = null;
+        }}
       >
         <canvas
           ref={canvasRef}
@@ -456,11 +508,31 @@ const GameCanvas: React.FC = () => {
             </div>
           </div>
           
-          <div className="flex items-center gap-2 bg-black/40 px-3 py-1 rounded-full border border-white/10 backdrop-blur-sm">
-            <RotateCcw className="w-4 h-4 text-blue-400" />
-            <span className="text-sm font-bold">LOOPS: {loops}</span>
+          <div className="flex flex-col gap-2 items-end">
+            <div className="flex items-center gap-2 bg-black/40 px-3 py-1 rounded-full border border-white/10 backdrop-blur-sm">
+              <RotateCcw className="w-4 h-4 text-blue-400" />
+              <span className="text-sm font-bold">LOOPS: {loops}</span>
+            </div>
+            <button 
+              onClick={(e) => { e.stopPropagation(); toggleMute(); }}
+              className="pointer-events-auto p-2 bg-black/40 rounded-full border border-white/10 backdrop-blur-sm hover:bg-white/10 transition-colors"
+            >
+              {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            </button>
           </div>
         </div>
+
+        {/* Mobile Loop Button */}
+        {gameState === 'playing' && (
+          <div className="absolute bottom-8 right-8 pointer-events-auto md:hidden">
+            <button
+              onClick={(e) => { e.stopPropagation(); triggerLoop(); }}
+              className="w-16 h-16 bg-blue-600/50 rounded-full border-4 border-blue-400 flex items-center justify-center active:scale-90 transition-transform backdrop-blur-sm"
+            >
+              <RotateCcw className="w-8 h-8 text-white" />
+            </button>
+          </div>
+        )}
 
         {/* Overlays */}
         <AnimatePresence>
@@ -491,6 +563,7 @@ const GameCanvas: React.FC = () => {
                   <div className="bg-white/5 p-2 rounded">Arrows/WASD: Move</div>
                   <div className="bg-white/5 p-2 rounded">Space: Shoot</div>
                   <div className="bg-white/5 p-2 rounded col-span-2">B / X: Loop Maneuver</div>
+                  <div className="bg-white/5 p-2 rounded col-span-2">Mobile: Drag to move</div>
                 </div>
               </div>
             </motion.div>
